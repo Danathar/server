@@ -38,8 +38,14 @@ spec:
         env:
         - name: POSTGRESQL_USERNAME
           value: "postgres"
+        # Superuser password lives in the kubeflex-postgres Secret (see
+        # 15-kubeflex-postgres-secret.yaml, generated at first boot) so it is
+        # never committed to git or exposed in the pod spec. See #98.
         - name: POSTGRESQL_PASSWORD
-          value: "kubeflex"
+          valueFrom:
+            secretKeyRef:
+              name: kubeflex-postgres
+              key: password
         - name: POSTGRESQL_DATABASE
           value: "postgres"
         ports:
