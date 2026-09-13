@@ -506,7 +506,7 @@ install-vm:
       -drive file="$TARGET_RAW",format=raw,if=virtio \
       -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
       -drive if=pflash,format=raw,file="$OVMF_VARS" \
-      -nic user,model=virtio-net-pci,hostfwd=tcp::8080-:8080,hostfwd=tcp::2222-:22 &
+      -nic user,model=virtio-net-pci,hostfwd=tcp::8080-:8080,hostfwd=tcp::2222-:22,hostfwd=tcp::6443-:6443 &
     QEMU_PID=$!
     cleanup() {
       if kill -0 "$QEMU_PID" 2>/dev/null; then
