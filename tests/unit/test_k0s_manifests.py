@@ -139,6 +139,34 @@ def test_argocd_workloads_are_wired_together():
     assert services["argocd-repo-server"]["ports"][0]["port"] == 8081
 
 
+def test_argocd_statefulset_governing_services_exist():
+    # A StatefulSet's spec.serviceName names its governing headless Service.
+    # Kubernetes does not reject a dangling reference -- the pods run and only
+    # their per-pod DNS records silently fail to resolve -- so nothing catches
+    # this at apply time. Upstream v2.12 ships the matching
+    # argocd-application-controller Service for the controller's metrics port.
+    docs = argocd_docs()
+    services = {d["metadata"]["name"]: d["spec"] for d in docs if d["kind"] == "Service"}
+    for statefulset in (d for d in docs if d["kind"] == "StatefulSet"):
+        name = statefulset["metadata"]["name"]
+        governing = statefulset["spec"]["serviceName"]
+        assert governing in services, (
+            f"{name} declares serviceName {governing}, but no such Service is shipped"
+        )
+        labels = statefulset["spec"]["template"]["metadata"]["labels"]
+        assert services[governing]["selector"].items() <= labels.items(), (
+            f"{governing} does not select {name}'s pods"
+        )
+
+    # The controller exposes only metrics; the port must match its container.
+    (port,) = services["argocd-application-controller"]["ports"]
+    container = next(
+        d for d in docs if d["kind"] == "StatefulSet"
+    )["spec"]["template"]["spec"]["containers"][0]
+    assert port["port"] == 8082
+    assert port["targetPort"] == container["ports"][0]["name"] == "metrics"
+
+
 def test_argocd_redis_ingress_is_restricted_to_its_clients():
     # redis carries no requirepass, and the application controller that reads
     # the cache holds */*/* cluster-admin, so ClusterIP on a single node is not
