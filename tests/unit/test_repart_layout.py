@@ -180,6 +180,26 @@ def test_root_slot_grows_and_is_bounded_below_the_var_partition():
     assert "SizeMaxBytes" in root, (
         "the root slot must be capped, otherwise /var gets no space on small disks"
     )
+    assert parse_size(root["SizeMaxBytes"]) <= 8 * 1024**3, (
+        "the root slot must be capped at 8 GiB or less so /var fits on a 16 GiB disk"
+    )
+
+
+def test_bounded_partitions_leave_room_for_var_on_minimum_target_disk():
+    # Smoke-test and minimal installer target disks are 16 GiB (SHOW_ME_THE_FUTURE_DISK_SIZE).
+    target_disk = 16 * 1024**3
+    esp = next(s for s in partitions().values() if s["Type"] == "esp")
+    root = next(s for s in partitions().values() if s["Type"] == "root")
+    var = next(s for s in partitions().values() if s["Type"] == "var")
+
+    esp_max = parse_size(esp["SizeMaxBytes"])
+    root_max = parse_size(root["SizeMaxBytes"])
+    var_min = parse_size(var["SizeMinBytes"])
+
+    assert esp_max + root_max + var_min <= target_disk, (
+        f"ESP max ({esp_max}) + root max ({root_max}) + var min ({var_min}) "
+        f"exceeds 16 GiB target disk ({target_disk}), which starves /var"
+    )
 
 
 def test_var_is_a_growing_xfs_tail():

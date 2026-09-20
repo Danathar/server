@@ -94,7 +94,7 @@ container runtime pod sandboxes.
 | Partition | Type | Size | Contents |
 |---|---|---|---|
 | ESP | vfat | 500 MiB – 1 GiB | `systemd-boot` + target OS UKI (`bluefin-server.efi`) |
-| `bluefin-server-root-a` | XFS | 4 GiB – 16 GiB | OS root filesystem (copied from installer data partition) |
+| `bluefin-server-root-a` | XFS | 4 GiB – 8 GiB | OS root filesystem (copied from installer data partition) |
 | `var` | XFS | ≥ 4 GiB | Writable persistent `/var`; grows to fill remaining disk |
 
 ## Installer Boot Flow
