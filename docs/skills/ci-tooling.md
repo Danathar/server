@@ -42,11 +42,20 @@ before adding an action.
 
 ### Installing `just` — taiki-e/install-action, not snap/cargo/apt
 
+Pin the tool version too, not only the action SHA. Without `@<version>`,
+`install-action` resolves `just@latest` at run time, so the CI contract
+(`just validate`, `just test-unit`, the DDI/kernel export recipes) runs against
+a binary chosen by an upstream release rather than by a commit in this repo.
+
 ```yaml
 - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
   with:
-    tool: just
+    tool: just@1.58.0
 ```
+
+The version is repeated at each call site — currently `build.yml` (two jobs),
+`kernel.yml` and `unit-tests.yml`. Bumping `just` means changing all of them in
+one commit, so CI never runs two versions at once.
 
 ### Workflow permissions
 
@@ -130,10 +139,13 @@ uploaded to a GitHub Release tagged `installer-v<FSDK-RELEASE>`.
 |---|---|
 | "It's just a minor version tag, supply-chain risk is low." | One compromised tag push owns every repo using it. Pin to SHA. |
 | "I'll check what SHA other repos use later." | Check now — it's one `gh api` call and takes a few seconds. |
+| "`tool: just` always installs a working version." | It installs whatever is latest that day. A `just` release can change recipe parsing or `--fmt` output and break CI with no commit in this repo. |
 
 ## Red Flags
 
 - Any `uses:` line with a mutable ref (`@v2`, `@main`, `@latest`).
+- An `install-action` step whose `tool:` has no `@<version>` — the pin is half
+  done, since the action is fixed but the binary it installs is not.
 - `sudo podman` in one step and plain `podman` in another step doing the same
   operation.
 - A new action not present in any sibling repo — check upstream first.
@@ -141,6 +153,7 @@ uploaded to a GitHub Release tagged `installer-v<FSDK-RELEASE>`.
 ## Verification
 
 - [ ] Every `uses:` line has a full 40-character SHA and a `# vX` comment.
+- [ ] Every `install-action` `tool:` names an explicit version (`just@1.58.0`).
 - [ ] `just validate` passes after workflow changes.
 - [ ] No new mutable action refs introduced.
 - [ ] The release signing step uploads detached `.gpg` signatures for every
