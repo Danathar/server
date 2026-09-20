@@ -68,6 +68,27 @@ def test_argocd_stack_is_complete():
     }
 
 
+def test_argocd_application_crds_have_no_status_subresource():
+    # The application controller writes health/sync/operationState by
+    # updating the Application itself, not its /status endpoint. A status
+    # subresource on Application or AppProject makes the API server strip
+    # `.status` from those writes, so Applications never record sync state --
+    # argocd-server still goes ready, so #177 looks fixed while the stack is
+    # useless. Upstream v2.12 ships `subresources: {}` on Application and none
+    # on AppProject; only ApplicationSet has one.
+    versions = {
+        d["metadata"]["name"]: d["spec"]["versions"][0]
+        for d in argocd_docs()
+        if d["kind"] == "CustomResourceDefinition"
+    }
+    for name in ("applications.argoproj.io", "appprojects.argoproj.io"):
+        assert not versions[name].get("subresources"), (
+            f"{name} must not enable a status subresource: the API server would "
+            "silently drop status from the controller's writes"
+        )
+    assert versions["applicationsets.argoproj.io"]["subresources"] == {"status": {}}
+
+
 def test_argocd_rbac_is_bound():
     # Without namespace RBAC the server's configmap/secret and Application
     # informers never sync, which is the state issue #177 reported.

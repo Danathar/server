@@ -13,6 +13,15 @@
 # the sysext payload stays small; the API server still stores and serves the full
 # resource. The ApplicationSet CRD is registered for API completeness — the
 # applicationset controller is not part of this stack.
+#
+# Application and AppProject deliberately declare no status subresource, which
+# matches upstream (`subresources: {}` on the Application CRD, none at all on
+# AppProject; only ApplicationSet has one). The application controller persists
+# health, sync and operationState by updating/patching the Application itself,
+# not its /status endpoint — enabling the subresource would make the API server
+# silently drop `.status` from those writes, and the RBAC below grants no
+# applications/status anyway. Adding it here reports as "more correct" and
+# quietly breaks every Application the stack is meant to run.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -39,8 +48,6 @@ spec:
   - name: v1alpha1
     served: true
     storage: true
-    subresources:
-      status: {}
     schema:
       openAPIV3Schema:
         type: object
@@ -76,8 +83,6 @@ spec:
   - name: v1alpha1
     served: true
     storage: true
-    subresources:
-      status: {}
     schema:
       openAPIV3Schema:
         type: object
