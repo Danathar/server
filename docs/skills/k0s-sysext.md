@@ -59,7 +59,7 @@ Design choices:
 | `files/k0s/sysext/k0scontroller.service` | systemd unit for the k0s single-node controller/worker. Not enabled by default. |
 | `files/k0s/sysext/extension-release.k0s` | Static sysext identity (`ID=_any`); `VERSION_ID=`/`ARCHITECTURE=` are appended at build time. |
 | `files/k0s/sysext/k0s-manifests.conf` | tmpfiles rule that copies declarative stacks to `/var/lib/k0s/manifests/`. |
-| `files/k0s/manifests/argocd/` | Raw YAML manifests for Argo CD. |
+| `files/k0s/manifests/argocd/` | Raw YAML manifests for the Argo CD core stack: CRDs, RBAC, redis, repo-server, application controller, and server. All four workloads are required — the server blocks on its informers and never binds `:8080` without them. |
 | `files/k0s/manifests/kubestellar/` | Raw YAML manifests for KubeFlex, Postgres, KubeStellar core, and Console. |
 | `files/os/sysupdate.k0s.d/70-k0s.transfer` | sysupdate transfer track for the k0s sysext component. |
 | `Justfile` | `build-sysext` / `export-sysext` targets. |

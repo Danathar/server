@@ -51,6 +51,7 @@ k0s kubectl get pods -A
 - **Extension not merged**: Check `systemd-sysext status`. Verify the persistent image is `/var/lib/k0s/k0s.raw`; the boot activation unit copies it into `/run/extensions/k0s.raw`.
 - **Manifests not applied**: Check `/var/lib/k0s/manifests/`. Ensure files end in `.yaml` (not `.yml`).
 - **Service failed**: Check `journalctl -u k0scontroller -e`.
+- **`argocd-server` stuck at `0/1` with `connection refused` on `/healthz`**: it is waiting on a dependency, not the probe. Confirm `argocd-redis`, `argocd-repo-server` and `argocd-application-controller` are `Running`, then check `k0s kubectl -n argocd logs deploy/argocd-server` for RBAC `forbidden` errors — the server only binds `:8080` once its configmap/secret and Application informers have synced.
 
 ## See also
 

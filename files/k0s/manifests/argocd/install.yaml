@@ -1,12 +1,150 @@
+# Argo CD core stack for the single-node k0s sysext.
+#
+# argocd-server cannot serve :8080 on its own: before it binds the listener it
+# waits for its AppProject/Application informers to sync and for the settings
+# manager to read (and seed) argocd-cm / argocd-secret. Without the CRDs, the
+# namespace RBAC and the supporting workloads it stays 0/1 and the readiness
+# probe reports "connection refused". This stack therefore ships the four
+# components Argo CD needs to reach a healthy state: redis, repo-server,
+# application-controller and server, plus their CRDs, RBAC and config.
+#
+# CRD schemas are intentionally trimmed to `x-kubernetes-preserve-unknown-fields`
+# (same approach as the KubeFlex CRDs in ../kubestellar/00-kubeflex-crds.yaml) so
+# the sysext payload stays small; the API server still stores and serves the full
+# resource. The ApplicationSet CRD is registered for API completeness — the
+# applicationset controller is not part of this stack.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: argocd
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: argocd
+spec:
+  group: argoproj.io
+  names:
+    kind: Application
+    listKind: ApplicationList
+    plural: applications
+    singular: application
+    shortNames:
+    - app
+    - apps
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          operation:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: appprojects.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: argocd
+spec:
+  group: argoproj.io
+  names:
+    kind: AppProject
+    listKind: AppProjectList
+    plural: appprojects
+    singular: appproject
+    shortNames:
+    - appproj
+    - appprojs
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applicationsets.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: argocd
+spec:
+  group: argoproj.io
+  names:
+    kind: ApplicationSet
+    listKind: ApplicationSetList
+    plural: applicationsets
+    singular: applicationset
+    shortNames:
+    - appset
+    - appsets
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: argocd-server
+  namespace: argocd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-redis
   namespace: argocd
 ---
 apiVersion: v1
@@ -19,6 +157,373 @@ metadata:
     app.kubernetes.io/part-of: argocd
 data:
   application.instanceLabelKey: argocd.argoproj.io/instance
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  policy.default: role:readonly
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-ssh-known-hosts-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-ssh-known-hosts-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  ssh_known_hosts: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-tls-certs-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-tls-certs-cm
+    app.kubernetes.io/part-of: argocd
+---
+# Seeded empty on purpose: argocd-server generates `server.secretkey` and the
+# initial admin bcrypt hash into this Secret on first start.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-secret
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-secret
+    app.kubernetes.io/part-of: argocd
+type: Opaque
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/part-of: argocd
+rules:
+- apiGroups: [""]
+  resources: [secrets, configmaps]
+  verbs: [create, get, list, watch, update, patch, delete]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, list]
+- apiGroups: [""]
+  resources: [pods, pods/log]
+  verbs: [get, list, watch]
+- apiGroups: [argoproj.io]
+  resources: [applications, applicationsets, appprojects]
+  verbs: [create, get, list, watch, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: argocd
+rules:
+- apiGroups: [""]
+  resources: [secrets, configmaps]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, list]
+- apiGroups: [argoproj.io]
+  resources: [applications, applicationsets, appprojects]
+  verbs: [create, get, list, watch, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/part-of: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-server
+subjects:
+- kind: ServiceAccount
+  name: argocd-server
+  namespace: argocd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-application-controller
+subjects:
+- kind: ServiceAccount
+  name: argocd-application-controller
+  namespace: argocd
+---
+# Matches the upstream argocd-server ClusterRole: the UI reads live resources
+# and performs resource actions, but it does not need cluster-wide list/watch —
+# the application controller's cache serves the resource tree.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-server
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/part-of: argocd
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: [get, patch, delete]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [list]
+- apiGroups: [""]
+  resources: [pods, pods/log]
+  verbs: [get]
+---
+# The application controller reconciles arbitrary user-supplied manifests, so it
+# needs full access to every API group — this mirrors the upstream Argo CD
+# ClusterRole for argocd-application-controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-application-controller
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: argocd
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+- nonResourceURLs: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-server
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/part-of: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-server
+subjects:
+- kind: ServiceAccount
+  name: argocd-server
+  namespace: argocd
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-application-controller
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-application-controller
+subjects:
+- kind: ServiceAccount
+  name: argocd-application-controller
+  namespace: argocd
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-redis
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-redis
+    app.kubernetes.io/part-of: argocd
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: redis
+    name: tcp-redis
+  selector:
+    app.kubernetes.io/name: argocd-redis
+---
+# Cache only — no persistence and no requirepass. The Service is ClusterIP and
+# the cluster is single-node, so redis is never reachable off-host; Argo CD
+# reads REDIS_PASSWORD from the optional `argocd-redis` Secret, which this
+# stack deliberately does not create.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-redis
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-redis
+    app.kubernetes.io/part-of: argocd
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd-redis
+    spec:
+      serviceAccountName: argocd-redis
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+      containers:
+      - name: redis
+        image: docker.io/library/redis:7.0.15-alpine
+        args:
+        - --save
+        - ""
+        - --appendonly
+        - "no"
+        ports:
+        - containerPort: 6379
+          name: redis
+        readinessProbe:
+          tcpSocket:
+            port: redis
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-repo-server
+    app.kubernetes.io/part-of: argocd
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8081
+    targetPort: server
+    name: server
+  - port: 8084
+    targetPort: metrics
+    name: metrics
+  selector:
+    app.kubernetes.io/name: argocd-repo-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-repo-server
+    app.kubernetes.io/part-of: argocd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-repo-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd-repo-server
+    spec:
+      serviceAccountName: argocd-repo-server
+      containers:
+      - name: argocd-repo-server
+        image: quay.io/argoproj/argocd:v2.12.3
+        command: [argocd-repo-server, --redis, "argocd-redis:6379"]
+        ports:
+        - containerPort: 8081
+          name: server
+        - containerPort: 8084
+          name: metrics
+        readinessProbe:
+          tcpSocket:
+            port: server
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: ssh-known-hosts
+          mountPath: /app/config/ssh
+        - name: tls-certs
+          mountPath: /app/config/tls
+        - name: tmp
+          mountPath: /tmp
+        - name: helm-working-dir
+          mountPath: /helm-working-dir
+      volumes:
+      - name: ssh-known-hosts
+        configMap:
+          name: argocd-ssh-known-hosts-cm
+      - name: tls-certs
+        configMap:
+          name: argocd-tls-certs-cm
+      - name: tmp
+        emptyDir: {}
+      - name: helm-working-dir
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: argocd-application-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-application-controller
+    app.kubernetes.io/part-of: argocd
+spec:
+  serviceName: argocd-application-controller
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-application-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd-application-controller
+    spec:
+      serviceAccountName: argocd-application-controller
+      containers:
+      - name: argocd-application-controller
+        image: quay.io/argoproj/argocd:v2.12.3
+        command:
+        - argocd-application-controller
+        - --redis
+        - argocd-redis:6379
+        - --repo-server
+        - argocd-repo-server:8081
+        env:
+        - name: ARGOCD_CONTROLLER_REPLICAS
+          value: "1"
+        ports:
+        - containerPort: 8082
+          name: metrics
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,16 +547,49 @@ spec:
       containers:
       - name: argocd-server
         image: quay.io/argoproj/argocd:v2.12.3
-        command: [argocd-server, --insecure, --staticassets, /shared/app]
+        command:
+        - argocd-server
+        - --insecure
+        - --staticassets
+        - /shared/app
+        - --redis
+        - argocd-redis:6379
+        - --repo-server
+        - argocd-repo-server:8081
         ports:
         - containerPort: 8080
           name: server
+        # Plain /healthz on both probes: the "full" variant also fails when
+        # redis or the repo-server is still pulling, which would restart the
+        # API server in a loop on a cold first boot.
         readinessProbe:
           httpGet:
             path: /healthz
-            port: 8080
+            port: server
           initialDelaySeconds: 5
           periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: server
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        volumeMounts:
+        - name: ssh-known-hosts
+          mountPath: /app/config/ssh
+        - name: tls-certs
+          mountPath: /app/config/tls
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: ssh-known-hosts
+        configMap:
+          name: argocd-ssh-known-hosts-cm
+      - name: tls-certs
+        configMap:
+          name: argocd-tls-certs-cm
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -65,7 +603,7 @@ spec:
   type: ClusterIP
   ports:
   - port: 80
-    targetPort: 8080
+    targetPort: server
     name: http
   selector:
     app.kubernetes.io/name: argocd-server
