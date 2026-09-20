@@ -118,6 +118,47 @@ def test_argocd_workloads_are_wired_together():
     assert services["argocd-repo-server"]["ports"][0]["port"] == 8081
 
 
+def test_argocd_redis_ingress_is_restricted_to_its_clients():
+    # redis carries no requirepass, and the application controller that reads
+    # the cache holds */*/* cluster-admin, so ClusterIP on a single node is not
+    # a boundary: every other workload on the node can dial it. The policy is
+    # derived from, and must stay equal to, the set of pods that actually talk
+    # to redis -- so adding a fourth client fails here rather than at runtime.
+    docs = argocd_docs()
+    pod_specs = {
+        d["metadata"]["name"]: d["spec"]["template"]
+        for d in docs
+        if d["kind"] in ("Deployment", "StatefulSet")
+    }
+    clients = {
+        template["metadata"]["labels"]["app.kubernetes.io/name"]
+        for name, template in pod_specs.items()
+        if "argocd-redis:6379" in " ".join(template["spec"]["containers"][0]["command"])
+    }
+    assert clients == {
+        "argocd-server",
+        "argocd-application-controller",
+        "argocd-repo-server",
+    }
+
+    policy = next(d for d in docs if d["kind"] == "NetworkPolicy")
+    assert policy["metadata"]["namespace"] == "argocd"
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+
+    # It must select the redis pod itself, by the label its Deployment uses.
+    redis_labels = pod_specs["argocd-redis"]["metadata"]["labels"]
+    assert policy["spec"]["podSelector"]["matchLabels"].items() <= redis_labels.items()
+
+    (rule,) = policy["spec"]["ingress"]
+    (selector,) = rule["from"]
+    assert "namespaceSelector" not in selector, "ingress must not be opened to other namespaces"
+    (expression,) = selector["podSelector"]["matchExpressions"]
+    assert expression["key"] == "app.kubernetes.io/name"
+    assert expression["operator"] == "In"
+    assert set(expression["values"]) == clients
+    assert rule["ports"] == [{"protocol": "TCP", "port": 6379}]
+
+
 def test_argocd_secret_is_seeded_empty():
     # argocd-server writes server.secretkey into this Secret on first start; it
     # must exist but must never carry a committed credential.

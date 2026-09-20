@@ -363,10 +363,17 @@ spec:
   selector:
     app.kubernetes.io/name: argocd-redis
 ---
-# Cache only — no persistence and no requirepass. The Service is ClusterIP and
-# the cluster is single-node, so redis is never reachable off-host; Argo CD
-# reads REDIS_PASSWORD from the optional `argocd-redis` Secret, which this
-# stack deliberately does not create.
+# Cache only — no persistence and no requirepass. Argo CD reads REDIS_PASSWORD
+# from the optional `argocd-redis` Secret, which this stack deliberately does
+# not create; the NetworkPolicy below is what keeps the cache private instead.
+#
+# ClusterIP and single-node were the original argument, and they are not
+# enough: they address reach from off-host, but the threat is in-cluster.
+# Every pod on this node — kubeflex-controller-manager, postgres,
+# kubestellar-controller-manager, kubestellar-console, kiosk-proxy — can dial
+# a ClusterIP, and the application controller that reads this cache holds
+# `*/*/*` cluster-admin (see its ClusterRole above), so a poisoned cache entry
+# is reachable from any of them.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -408,6 +415,58 @@ spec:
             port: redis
           initialDelaySeconds: 5
           periodSeconds: 10
+---
+# Restricts the unauthenticated cache to the three Argo CD components that use
+# it, so a compromised workload elsewhere on this single node cannot poison
+# what the cluster-admin application controller reads.
+#
+# Selecting on pod labels, not ServiceAccounts: NetworkPolicy has no notion of
+# a ServiceAccount. These are the labels the four workloads in this file
+# already carry, and each is also its Deployment/StatefulSet selector, so they
+# cannot drift without breaking the workload first.
+#
+# This depends on the CNI enforcing NetworkPolicy. k0s runs with no
+# `spec.network.provider` set (files/k0s/sysext/k0scontroller.service passes
+# only `--enable-worker --single --disable-components=helm,autopilot`), so it
+# defaults to kube-router with its NetworkPolicy controller on. If that ever
+# changes to a provider without enforcement, this object silently becomes
+# decorative -- at which point redis needs a real `requirepass`, seeded the way
+# files/k0s/kubeflex/generate-postgres-secret.sh seeds the postgres password.
+#
+# Confirm on a first-boot VM: redis's readiness probe is a kubelet tcpSocket
+# dial originating from the node, not from a pod, so it matches no rule here.
+# kube-router is expected to permit local-node traffic for exactly this reason,
+# but if `kubectl -n argocd get pod -l app.kubernetes.io/name=argocd-redis`
+# stays NotReady after this policy lands, that exemption is the first thing to
+# check -- and the fix is an added ipBlock rule for the node CIDR, not dropping
+# the policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-redis
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-redis
+    app.kubernetes.io/part-of: argocd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values:
+          - argocd-application-controller
+          - argocd-repo-server
+          - argocd-server
+    ports:
+    - protocol: TCP
+      port: 6379
 ---
 apiVersion: v1
 kind: Service

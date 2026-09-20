@@ -52,6 +52,7 @@ k0s kubectl get pods -A
 - **Manifests not applied**: Check `/var/lib/k0s/manifests/`. Ensure files end in `.yaml` (not `.yml`).
 - **Service failed**: Check `journalctl -u k0scontroller -e`.
 - **`argocd-server` stuck at `0/1` with `connection refused` on `/healthz`**: it is waiting on a dependency, not the probe. Confirm `argocd-redis`, `argocd-repo-server` and `argocd-application-controller` are `Running`, then check `k0s kubectl -n argocd logs deploy/argocd-server` for RBAC `forbidden` errors — the server only binds `:8080` once its configmap/secret and Application informers have synced.
+- **An Argo CD component cannot reach redis**: the `argocd-redis` NetworkPolicy allows ingress on `6379` only from pods labelled `app.kubernetes.io/name in (argocd-server, argocd-repo-server, argocd-application-controller)`. redis carries no `requirepass`, so that policy is the only thing keeping the cache private from the KubeStellar and Postgres workloads sharing this node — widen the label set rather than deleting the policy. If `argocd-redis` itself never goes `Ready`, suspect the kubelet `tcpSocket` probe: it dials from the node, not from a pod, and needs the CNI's local-node exemption. Check enforcement with `k0s kubectl -n argocd describe networkpolicy argocd-redis`.
 
 ## See also
 
