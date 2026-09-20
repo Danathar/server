@@ -54,8 +54,11 @@ def test_install_vm_probes_readiness_inside_the_guest_over_tls() -> None:
     # non-2xx response, which is exactly "healthz ok and / returns 200",
     # and it avoids embedding quotes inside a systemd ExecStart= line, whose
     # escaping rules differ from a plain shell.
-    assert "ExecStart=/usr/bin/bash -c 'until curl" in recipe
-    assert "jq" not in recipe
+    exec_start_line = next(
+        line for line in recipe.splitlines() if line.strip().startswith("ExecStart=")
+    )
+    assert exec_start_line.strip().startswith("ExecStart=/usr/bin/bash -c 'until curl")
+    assert "jq" not in exec_start_line
 
     # ttyS0 must be the last (and therefore primary) console so /dev/console
     # resolves to the serial device the host captures, matching the ordering
