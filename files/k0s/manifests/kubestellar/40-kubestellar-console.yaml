@@ -62,13 +62,17 @@ spec:
               name: kubestellar-console-github-oauth
               key: client-secret
               optional: true
-        # When unset, the image's own start.sh generates a random
-        # openssl rand -hex 32 secret (persisted to $INSTALL_DIR/data/
-        # .jwt_secret so it survives a plain container restart, but lost on
-        # pod recreation since no volume is mounted here) rather than
-        # falling back to an empty or compiled-in default -- verified
-        # against the pinned v0.3.34 tag:
-        # https://github.com/kubestellar/console/blob/v0.3.34/start.sh#L524-L541
+        # When unset, the server itself generates a random secret because
+        # DEV_MODE=true above: pkg/api/server.go calls loadOrCreateDevSecret,
+        # which persists it as .jwt-secret under os.UserConfigDir() inside
+        # the container (survives a plain container restart, lost on pod
+        # recreation since no volume is mounted here). Without DEV_MODE an
+        # unset JWT_SECRET is a fatal exit, not a weak default, so removing
+        # DEV_MODE requires setting jwt-secret in the Secret. Verified
+        # against the pinned v0.3.34 tag (the image entrypoint is
+        # entrypoint.sh, not start.sh):
+        # https://github.com/kubestellar/console/blob/v0.3.34/pkg/api/server.go#L78-L89
+        # https://github.com/kubestellar/console/blob/v0.3.34/pkg/api/startup.go#L350-L388
         - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
