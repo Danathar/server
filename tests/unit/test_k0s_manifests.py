@@ -143,8 +143,12 @@ def test_argocd_statefulset_governing_services_exist():
     # A StatefulSet's spec.serviceName names its governing headless Service.
     # Kubernetes does not reject a dangling reference -- the pods run and only
     # their per-pod DNS records silently fail to resolve -- so nothing catches
-    # this at apply time. Upstream v2.12 ships the matching
-    # argocd-application-controller Service for the controller's metrics port.
+    # this at apply time. Upstream v2.12 ships no Service by this name at all
+    # (the serviceName dangles there too; the controller's metrics live on a
+    # separate argocd-metrics Service). This repo ships its own ClusterIP
+    # Service so the reference resolves and Prometheus has something to scrape
+    # on the controller's own metrics port -- it does not, and does not claim
+    # to, provide per-pod DNS, which would require a headless Service instead.
     docs = argocd_docs()
     services = {d["metadata"]["name"]: d["spec"] for d in docs if d["kind"] == "Service"}
     for statefulset in (d for d in docs if d["kind"] == "StatefulSet"):

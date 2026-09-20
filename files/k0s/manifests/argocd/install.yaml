@@ -195,7 +195,12 @@ metadata:
     app.kubernetes.io/part-of: argocd
 ---
 # Seeded empty on purpose: argocd-server generates `server.secretkey` and the
-# initial admin bcrypt hash into this Secret on first start.
+# initial admin bcrypt hash into this Secret on first start. The `C+` tmpfiles
+# rule (files/k0s/sysext/k0s-manifests.conf) re-copies this manifest file into
+# /var/lib/k0s/manifests on every boot, and k0s's Manifest Deployer applies it
+# the same way `kubectl apply` does -- a three-way merge against the last
+# applied configuration, which never included `data`, so the generated
+# secretkey and admin hash are not in the diff and survive the reapply.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -511,6 +516,11 @@ spec:
       labels:
         app.kubernetes.io/name: argocd-repo-server
     spec:
+      # Deliberately omits upstream's gpg-keys/gpg-keyring emptyDir mounts at
+      # /app/config/gpg/{keys,source}: this stack ships no GPG commit-verification
+      # config, and the quay.io/argoproj/argocd:v2.12.3 image already chowns
+      # /app/config/gpg/keys, so the repo-server starts clean without them. Add
+      # both mounts back if GPG signature verification is ever enabled here.
       serviceAccountName: argocd-repo-server
       containers:
       - name: argocd-repo-server
