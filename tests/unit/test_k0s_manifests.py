@@ -133,7 +133,7 @@ def test_argocd_redis_ingress_is_restricted_to_its_clients():
     clients = {
         template["metadata"]["labels"]["app.kubernetes.io/name"]
         for name, template in pod_specs.items()
-        if "argocd-redis:6379" in " ".join(template["spec"]["containers"][0]["command"])
+        if "argocd-redis:6379" in " ".join(template["spec"]["containers"][0].get("command", []))
     }
     assert clients == {
         "argocd-server",
