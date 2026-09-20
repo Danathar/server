@@ -448,6 +448,40 @@ install-vm:
     fi
 
     echo "==> Booting the installed kiosk..."
+    SERIAL_LOG="$STATE_DIR/kiosk-serial.log"
+    : > "$SERIAL_LOG"
+
+    # The kiosk proxy binds hostPort 8080 on the guest's loopback interface only
+    # (files/k0s/manifests/kubestellar/41-kubestellar-kiosk-proxy.yaml) and
+    # terminates TLS (files/k0s/kiosk/nginx.conf, `listen 8080 ssl`). A
+    # QEMU/libslirp hostfwd with an unspecified guest address is delivered to
+    # the guest's DHCP address, never to 127.0.0.1, so a host-side forward of
+    # 8080 can never reach the proxy, and a plaintext probe would fail against
+    # its TLS listener regardless. Probe readiness from inside the guest
+    # instead and report the verdict on the system console, which is captured
+    # in $SERIAL_LOG — the same in-guest-probe approach proposed for
+    # test-installer-artifact in #220. Host access, when wanted, goes over
+    # the existing SSH hostfwd rather than a direct (non-working) 8080
+    # forward. The readiness check deliberately does not parse the /healthz
+    # response body: curl --fail already fails on a non-2xx response, which
+    # is exactly "healthz ok and / returns 200", and it avoids embedding
+    # quotes inside a systemd ExecStart= line, where escaping rules differ
+    # from a plain shell.
+    READY_MARKER="KIOSK_CONSOLE_READY"
+    READY_UNIT=$(base64 -w0 <<'UNIT'
+    [Unit]
+    Description=Report KubeStellar Console readiness on the system console
+    ConditionPathExists=!/etc/initrd-release
+    After=k0s-first-boot.service
+
+    [Service]
+    Type=oneshot
+    TimeoutStartSec=infinity
+    StandardOutput=journal+console
+    ExecStart=/usr/bin/bash -c 'until curl --silent --fail --insecure --max-time 2 --output /dev/null https://127.0.0.1:8080/healthz && curl --silent --fail --insecure --max-time 2 --output /dev/null https://127.0.0.1:8080/; do sleep 2; done; echo KIOSK_CONSOLE_READY'
+    UNIT
+    )
+
     qemu-system-x86_64 \
       -enable-kvm \
       -m "${MEM_SIZE}" \
@@ -456,7 +490,10 @@ install-vm:
       -drive file="$TARGET_RAW",format=raw,if=virtio \
       -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
       -drive if=pflash,format=raw,file="$OVMF_VARS" \
-      -nic user,model=virtio-net-pci,hostfwd=tcp::8080-:8080,hostfwd=tcp::2222-:22,hostfwd=tcp::6443-:6443 &
+      -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22,hostfwd=tcp::6443-:6443 \
+      -smbios "type=11,value=io.systemd.credential.binary:systemd.extra-unit.bluefin-kiosk-ready.service=${READY_UNIT}" \
+      -smbios "type=11,value=io.systemd.stub.kernel-cmdline-extra=console=tty0 console=ttyS0,,115200 systemd.wants=bluefin-kiosk-ready.service" \
+      -serial file:"$SERIAL_LOG" &
     QEMU_PID=$!
     cleanup() {
       if kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -466,7 +503,8 @@ install-vm:
     }
     trap cleanup INT TERM
 
-    until curl --silent --show-error --max-time 2 --output /dev/null http://127.0.0.1:8080/; do
+    echo "==> Waiting for the KubeStellar Console to become ready inside the guest..."
+    until grep -q "$READY_MARKER" "$SERIAL_LOG" 2>/dev/null; do
       if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         wait "$QEMU_PID"
         exit 1
@@ -474,11 +512,13 @@ install-vm:
       sleep 2
     done
 
-    HOST_IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)"
     echo "==> KubeStellar Console is ready!"
-    echo "==> Access URL (LAN): http://${HOST_IP:-localhost}:8080/"
-    echo "==> Access URL (Local): http://localhost:8080/"
-    xdg-open "http://${HOST_IP:-localhost}:8080/" || xdg-open http://localhost:8080/ || true
+    echo "==> The kiosk proxy binds the guest's loopback interface only and terminates"
+    echo "==> TLS with a self-signed certificate, so it is not directly reachable from"
+    echo "==> the host. To view it in a host browser, start sshd inside the VM"
+    echo "==> (systemctl start sshd) and open a tunnel over the forwarded SSH port:"
+    echo "==>   ssh -p 2222 -L 8080:127.0.0.1:8080 <your-user>@127.0.0.1"
+    echo "==> then browse https://localhost:8080/ and accept the self-signed certificate."
     wait "$QEMU_PID"
 
 # Set up KubeStellar kc-agent for the user in ONE command.
