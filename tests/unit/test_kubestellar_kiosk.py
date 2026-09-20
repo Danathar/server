@@ -167,3 +167,91 @@ def test_k0scontroller_orders_after_kiosk_tls() -> None:
 def test_os_stack_includes_openssl() -> None:
     content = OS_STACK.read_text(encoding="utf-8")
     assert "freedesktop-sdk.bst:components/openssl.bst" in content
+
+
+def _kiosk_tls_execstart_script() -> str:
+    """Return the shell program systemd hands to bash for k0s-kiosk-tls.
+
+    ExecStart is ``/bin/bash -eu -c '<script>'``. systemd unescapes ``$$`` to
+    ``$`` before exec, so the test applies the same rewrite to run the exact
+    program the unit runs.
+    """
+    content = KIOSK_TLS_SERVICE.read_text(encoding="utf-8")
+    prefix = "ExecStart=/bin/bash -eu -c '"
+    line = next(line for line in content.splitlines() if line.startswith(prefix))
+    assert line.endswith("'"), "ExecStart script must be a single-quoted string"
+    return line[len(prefix) : -1].replace("$$", "$")
+
+
+def _run_kiosk_tls_script(tmp_path: Path, state_dir: Path) -> tuple[int, str]:
+    """Run the unit's script against a fake root with stubbed host tools."""
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "openssl.args"
+    (bin_dir / "hostname").write_text("#!/bin/sh\necho testhost\n", encoding="utf-8")
+    (bin_dir / "ip").write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "'2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global dynamic eth0\\       valid_lft 3181sec preferred_lft 3181sec' "
+        "'2: eth0    inet6 2001:db8::10/64 scope global dynamic mngtmpaddr\\       valid_lft forever preferred_lft forever'\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "openssl").write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > {log}\n"
+        "out=; key=\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case $1 in -out) out=$2; shift;; -keyout) key=$2; shift;; esac\n"
+        "  shift\n"
+        "done\n"
+        'echo cert > "$out"; echo key > "$key"\n',
+        encoding="utf-8",
+    )
+    for stub in ("hostname", "ip", "openssl"):
+        (bin_dir / stub).chmod(0o755)
+
+    script = _kiosk_tls_execstart_script().replace("/var/lib/k0s", str(state_dir))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode, log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+def test_k0s_kiosk_tls_script_puts_host_addresses_in_the_san(tmp_path: Path) -> None:
+    state_dir = tmp_path / "var" / "lib" / "k0s"
+    rc, openssl_args = _run_kiosk_tls_script(tmp_path, state_dir)
+
+    assert rc == 0, openssl_args
+    san = next(
+        arg for arg in openssl_args.splitlines() if arg.startswith("subjectAltName=")
+    )
+    assert san == (
+        "subjectAltName=DNS:localhost,DNS:*.local,IP:127.0.0.1,"
+        "DNS:testhost,IP:192.0.2.10,IP:2001:db8::10"
+    )
+    assert (state_dir / "kiosk" / "key.pem").read_text(encoding="utf-8") == "key\n"
+    assert (state_dir / "kiosk" / "cert.pem").read_text(encoding="utf-8") == "cert\n"
+    assert (state_dir / "kiosk" / "key.pem").stat().st_mode & 0o777 == 0o600
+    assert (state_dir / "kiosk" / "cert.pem").stat().st_mode & 0o777 == 0o644
+
+
+def test_k0s_kiosk_tls_script_keeps_existing_material(tmp_path: Path) -> None:
+    state_dir = tmp_path / "var" / "lib" / "k0s"
+    kiosk = state_dir / "kiosk"
+    kiosk.mkdir(parents=True)
+    (kiosk / "key.pem").write_text("existing key\n", encoding="utf-8")
+    (kiosk / "cert.pem").write_text("existing cert\n", encoding="utf-8")
+
+    rc, openssl_args = _run_kiosk_tls_script(tmp_path, state_dir)
+
+    assert rc == 0
+    assert openssl_args == "", "openssl must not run when key and cert already exist"
+    assert (kiosk / "key.pem").read_text(encoding="utf-8") == "existing key\n"
