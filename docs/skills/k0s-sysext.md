@@ -58,6 +58,7 @@ Design choices:
 | `elements/oci/k0s-sysext.bst` | Builds the EROFS sysext image (`k0s-<k0s-version>.raw`). |
 | `files/k0s/sysext/k0scontroller.service` | systemd unit for the k0s single-node controller/worker. Not enabled by default. |
 | `files/k0s/sysext/k0s-kiosk-tls.service` | Oneshot systemd unit generating persistent kiosk TLS cert and key on first boot. |
+| `files/k0s/kiosk-tls/generate-kiosk-tls.sh` | Generator run by `k0s-kiosk-tls.service`; also replaces the compromised build-time cert/key pair shipped by earlier releases. |
 | `files/k0s/sysext/extension-release.k0s` | Static sysext identity (`ID=_any`); `VERSION_ID=`/`ARCHITECTURE=` are appended at build time. |
 | `files/k0s/sysext/k0s-manifests.conf` | tmpfiles rule that copies declarative stacks to `/var/lib/k0s/manifests/`. |
 | `files/k0s/manifests/argocd/` | Raw YAML manifests for Argo CD. |

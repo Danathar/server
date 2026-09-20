@@ -33,6 +33,9 @@ sources:
     path: files/k0s/kubeflex
     directory: kubeflex-src
   - kind: local
+    path: files/k0s/kiosk-tls
+    directory: kiosk-tls-src
+  - kind: local
     path: files/os/issue.d/40-kubestellar.issue
     directory: issue-src
 
@@ -89,6 +92,12 @@ config:
       mkdir -p sysext/usr/share/k0s/kubeflex
       cp -a kubeflex-src/. sysext/usr/share/k0s/kubeflex/
       chmod 0755 sysext/usr/share/k0s/kubeflex/generate-postgres-secret.sh
+
+      # Stage kiosk first-boot TLS generator (run by k0s-kiosk-tls.service).
+      mkdir -p sysext/usr/share/k0s/kiosk-tls
+      cp -a kiosk-tls-src/. sysext/usr/share/k0s/kiosk-tls/
+      chmod 0755 sysext/usr/share/k0s/kiosk-tls/generate-kiosk-tls.sh
+
       # Build EROFS image
       mkfs.erofs -d0 "${OUT}/${FNAME}" sysext
 

@@ -26,6 +26,7 @@ PROXY_MANIFEST = (
     / "41-kubestellar-kiosk-proxy.yaml"
 )
 KIOSK_TLS_SERVICE = ROOT / "files" / "k0s" / "sysext" / "k0s-kiosk-tls.service"
+KIOSK_TLS_SCRIPT = ROOT / "files" / "k0s" / "kiosk-tls" / "generate-kiosk-tls.sh"
 K0S_CONTROLLER_SERVICE = ROOT / "files" / "k0s" / "sysext" / "k0scontroller.service"
 OS_STACK = ROOT / "elements" / "bluefin-server" / "os-stack.bst"
 
@@ -40,6 +41,10 @@ def test_kiosk_assets_are_packaged_and_seeded() -> None:
     assert "freedesktop-sdk.bst:components/openssl.bst" not in sysext
     assert "keyout" not in sysext
     assert "cp -a sysext-src/k0s-kiosk-tls.service sysext/usr/lib/systemd/system/" in sysext
+    assert "path: files/k0s/kiosk-tls" in sysext
+    assert "directory: kiosk-tls-src" in sysext
+    assert "cp -a kiosk-tls-src/. sysext/usr/share/k0s/kiosk-tls/" in sysext
+    assert "chmod 0755 sysext/usr/share/k0s/kiosk-tls/generate-kiosk-tls.sh" in sysext
     assert "path: files/k0s/kiosk" in sysext
     assert "directory: kiosk-src" in sysext
     assert "cp -a kiosk-src/. sysext/usr/share/k0s/kiosk/" in sysext
@@ -144,15 +149,22 @@ def test_k0s_kiosk_tls_service_contract() -> None:
     assert "RequiresMountsFor=/var/lib/k0s" in content
     assert "After=network-online.target systemd-tmpfiles-setup.service" in content
     assert "StateDirectory=k0s" in content
-    assert "chmod 0600 /var/lib/k0s/kiosk/key.pem" in content
-    assert "chmod 0644 /var/lib/k0s/kiosk/cert.pem" in content
-    assert "/CN=KubeStellar Console" in content
-    assert "DNS:localhost,DNS:*.local,IP:127.0.0.1" in content
-    assert "ip -o addr show scope global" in content
-    assert (
-        "test -s /var/lib/k0s/kiosk/key.pem && "
-        "test -s /var/lib/k0s/kiosk/cert.pem && exit 0"
-    ) in content
+    assert "ExecStart=/usr/share/k0s/kiosk-tls/generate-kiosk-tls.sh" in content
+
+
+def test_generate_kiosk_tls_script_contract() -> None:
+    assert KIOSK_TLS_SCRIPT.is_file(), "generate-kiosk-tls.sh is missing"
+    script = KIOSK_TLS_SCRIPT.read_text(encoding="utf-8")
+
+    # key.pem must never be world-readable, even between creation and chmod.
+    assert "umask 077" in script
+    assert 'chmod 0600 "$key"' in script
+    assert 'chmod 0644 "$cert"' in script
+    assert "/CN=KubeStellar Console/OU=host-generated" in script
+    assert "DNS:localhost,DNS:*.local,IP:127.0.0.1" in script
+    assert "ip -o addr show scope global" in script
+    # Known-compromised build-time SAN (private key published in old releases).
+    assert "IPAddress:10.0.2.15" in script
 
 
 def test_k0scontroller_orders_after_kiosk_tls() -> None:
@@ -169,22 +181,14 @@ def test_os_stack_includes_openssl() -> None:
     assert "freedesktop-sdk.bst:components/openssl.bst" in content
 
 
-def _kiosk_tls_execstart_script() -> str:
-    """Return the shell program systemd hands to bash for k0s-kiosk-tls.
+def _run_kiosk_tls_script(tmp_path: Path, state_dir: Path) -> tuple[int, str, str]:
+    """Run the shipped generator script against a fake root with stubbed tools.
 
-    ExecStart is ``/bin/bash -eu -c '<script>'``. systemd unescapes ``$$`` to
-    ``$`` before exec, so the test applies the same rewrite to run the exact
-    program the unit runs.
+    The openssl stub logs ``req`` invocations to a file and answers ``x509``
+    inspection queries from ``subject=``/``san=`` lines the stub itself wrote
+    into the fake cert (tests may also pre-write such certs to simulate
+    existing material).
     """
-    content = KIOSK_TLS_SERVICE.read_text(encoding="utf-8")
-    prefix = "ExecStart=/bin/bash -eu -c '"
-    line = next(line for line in content.splitlines() if line.startswith(prefix))
-    assert line.endswith("'"), "ExecStart script must be a single-quoted string"
-    return line[len(prefix) : -1].replace("$$", "$")
-
-
-def _run_kiosk_tls_script(tmp_path: Path, state_dir: Path) -> tuple[int, str]:
-    """Run the unit's script against a fake root with stubbed host tools."""
     import os
     import subprocess
 
@@ -201,33 +205,52 @@ def _run_kiosk_tls_script(tmp_path: Path, state_dir: Path) -> tuple[int, str]:
     )
     (bin_dir / "openssl").write_text(
         "#!/bin/sh\n"
+        'if [ "$1" = x509 ]; then\n'
+        "  in=; prev=\n"
+        '  for a in "$@"; do [ "$prev" = -in ] && in=$a; prev=$a; done\n'
+        '  case " $* " in\n'
+        '    *" -subject "*) grep "^subject=" "$in" || true;;\n'
+        '    *" -ext "*)\n'
+        '      echo "X509v3 Subject Alternative Name:"\n'
+        '      grep "^san=" "$in" | sed "s/^san=/    /" || true;;\n'
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
         f"printf '%s\\n' \"$@\" > {log}\n"
-        "out=; key=\n"
+        "out=; key=; subj=; san=\n"
         "while [ $# -gt 0 ]; do\n"
-        "  case $1 in -out) out=$2; shift;; -keyout) key=$2; shift;; esac\n"
+        "  case $1 in\n"
+        "    -out) out=$2; shift;; -keyout) key=$2; shift;;\n"
+        "    -subj) subj=$2; shift;; -addext) san=$2; shift;;\n"
+        "  esac\n"
         "  shift\n"
         "done\n"
-        'echo cert > "$out"; echo key > "$key"\n',
+        '{ echo cert; echo "subject=$subj"; echo "san=${san#subjectAltName=}"; } > "$out"\n'
+        'echo key > "$key"\n',
         encoding="utf-8",
     )
     for stub in ("hostname", "ip", "openssl"):
         (bin_dir / stub).chmod(0o755)
 
-    script = _kiosk_tls_execstart_script().replace("/var/lib/k0s", str(state_dir))
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "KIOSK_TLS_DIR": str(state_dir / "kiosk"),
+    }
     proc = subprocess.run(
-        ["bash", "-eu", "-c", script],
+        ["bash", str(KIOSK_TLS_SCRIPT)],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    return proc.returncode, log.read_text(encoding="utf-8") if log.exists() else ""
+    args = log.read_text(encoding="utf-8") if log.exists() else ""
+    return proc.returncode, args, proc.stderr
 
 
 def test_k0s_kiosk_tls_script_puts_host_addresses_in_the_san(tmp_path: Path) -> None:
     state_dir = tmp_path / "var" / "lib" / "k0s"
-    rc, openssl_args = _run_kiosk_tls_script(tmp_path, state_dir)
+    rc, openssl_args, _ = _run_kiosk_tls_script(tmp_path, state_dir)
 
     assert rc == 0, openssl_args
     san = next(
@@ -238,20 +261,75 @@ def test_k0s_kiosk_tls_script_puts_host_addresses_in_the_san(tmp_path: Path) -> 
         "DNS:testhost,IP:192.0.2.10,IP:2001:db8::10"
     )
     assert (state_dir / "kiosk" / "key.pem").read_text(encoding="utf-8") == "key\n"
-    assert (state_dir / "kiosk" / "cert.pem").read_text(encoding="utf-8") == "cert\n"
+    cert = (state_dir / "kiosk" / "cert.pem").read_text(encoding="utf-8")
+    assert cert.startswith("cert\n")
+    assert "subject=/CN=KubeStellar Console/OU=host-generated" in cert
     assert (state_dir / "kiosk" / "key.pem").stat().st_mode & 0o777 == 0o600
     assert (state_dir / "kiosk" / "cert.pem").stat().st_mode & 0o777 == 0o644
 
 
-def test_k0s_kiosk_tls_script_keeps_existing_material(tmp_path: Path) -> None:
+def test_k0s_kiosk_tls_script_keeps_existing_host_material(tmp_path: Path) -> None:
     state_dir = tmp_path / "var" / "lib" / "k0s"
     kiosk = state_dir / "kiosk"
     kiosk.mkdir(parents=True)
     (kiosk / "key.pem").write_text("existing key\n", encoding="utf-8")
-    (kiosk / "cert.pem").write_text("existing cert\n", encoding="utf-8")
+    (kiosk / "cert.pem").write_text(
+        "existing cert\n"
+        "subject=/CN=KubeStellar Console/OU=host-generated\n"
+        "san=DNS:localhost,DNS:*.local,IPAddress:127.0.0.1,IPAddress:192.0.2.10\n",
+        encoding="utf-8",
+    )
 
-    rc, openssl_args = _run_kiosk_tls_script(tmp_path, state_dir)
+    rc, openssl_args, _ = _run_kiosk_tls_script(tmp_path, state_dir)
 
     assert rc == 0
-    assert openssl_args == "", "openssl must not run when key and cert already exist"
+    assert openssl_args == "", "openssl req must not run when key and cert already exist"
     assert (kiosk / "key.pem").read_text(encoding="utf-8") == "existing key\n"
+
+
+def test_k0s_kiosk_tls_script_keeps_operator_provided_material(tmp_path: Path) -> None:
+    """Certs without the marker are kept unless they match the leaked SAN."""
+    state_dir = tmp_path / "var" / "lib" / "k0s"
+    kiosk = state_dir / "kiosk"
+    kiosk.mkdir(parents=True)
+    (kiosk / "key.pem").write_text("operator key\n", encoding="utf-8")
+    (kiosk / "cert.pem").write_text(
+        "operator cert\n"
+        "subject=/CN=console.example.org\n"
+        "san=DNS:console.example.org\n",
+        encoding="utf-8",
+    )
+
+    rc, openssl_args, _ = _run_kiosk_tls_script(tmp_path, state_dir)
+
+    assert rc == 0
+    assert openssl_args == ""
+    assert (kiosk / "key.pem").read_text(encoding="utf-8") == "operator key\n"
+
+
+def test_k0s_kiosk_tls_script_replaces_leaked_build_time_material(
+    tmp_path: Path,
+) -> None:
+    """Old releases shipped cert.pem/key.pem generated at build time inside the
+    public sysext image, so that private key is compromised. Upgraded hosts
+    still have it in /var/lib/k0s/kiosk; the script must detect the build-time
+    SAN (no host-generated marker) and regenerate in place.
+    """
+    state_dir = tmp_path / "var" / "lib" / "k0s"
+    kiosk = state_dir / "kiosk"
+    kiosk.mkdir(parents=True)
+    (kiosk / "key.pem").write_text("leaked key\n", encoding="utf-8")
+    (kiosk / "cert.pem").write_text(
+        "leaked cert\n"
+        "subject=/CN=KubeStellar Console\n"
+        "san=DNS:localhost,DNS:*.local,IPAddress:127.0.0.1,IPAddress:10.0.2.15\n",
+        encoding="utf-8",
+    )
+
+    rc, openssl_args, stderr = _run_kiosk_tls_script(tmp_path, state_dir)
+
+    assert rc == 0, stderr
+    assert "subjectAltName=" in openssl_args, "openssl req must regenerate the pair"
+    assert "compromised build-time certificate" in stderr
+    assert (kiosk / "key.pem").read_text(encoding="utf-8") == "key\n"
+    assert "host-generated" in (kiosk / "cert.pem").read_text(encoding="utf-8")
