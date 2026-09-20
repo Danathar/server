@@ -197,10 +197,15 @@ metadata:
 # Seeded empty on purpose: argocd-server generates `server.secretkey` and the
 # initial admin bcrypt hash into this Secret on first start. The `C+` tmpfiles
 # rule (files/k0s/sysext/k0s-manifests.conf) re-copies this manifest file into
-# /var/lib/k0s/manifests on every boot, and k0s's Manifest Deployer applies it
-# the same way `kubectl apply` does -- a three-way merge against the last
-# applied configuration, which never included `data`, so the generated
-# secretkey and admin hash are not in the diff and survive the reapply.
+# /var/lib/k0s/manifests on every boot. k0s's own docs describe the Manifest
+# Deployer as "quite similar to the use of the kubectl apply command", which
+# would mean a three-way merge against the last-applied configuration -- and
+# since that configuration never included `data`, the generated secretkey and
+# admin hash would not be in the diff and would survive the reapply. Expected
+# behaviour, not observed: confirm on the same first-boot VM pass this stack
+# still needs (see the redis NetworkPolicy comment below). If a boot ever
+# does wipe `server.secretkey`, that behaviour was wrong and this Secret needs
+# a `C` (create-only) tmpfiles rule instead of `C+`.
 apiVersion: v1
 kind: Secret
 metadata:
