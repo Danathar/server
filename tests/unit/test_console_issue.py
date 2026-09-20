@@ -16,6 +16,7 @@ def test_issue_file_exists_and_contains_kubestellar_url() -> None:
     content = ISSUE_FILE.read_text(encoding="utf-8")
     assert "Bluefin Server" in content
     assert "KubeStellar Console: https://127.0.0.1:8080/" in content
+    assert "ssh -L 8080:127.0.0.1:8080" in content
 
 
 def test_os_issue_element_target_usr_lib_issue_d() -> None:
