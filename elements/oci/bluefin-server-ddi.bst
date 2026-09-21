@@ -38,7 +38,7 @@ config:
         exit 1
       fi
       rm -f "/layer/usr/lib/modules/${KVER}/vmlinux" "/layer/usr/lib/modules/${KVER}/System.map"
-      depmod -b /layer "${KVER}"
+      depmod -b /layer/usr "${KVER}"
 
       # Stage extracted CA certificate bundle into target DDI rootfs
       mkdir -p /layer/etc/pki/ca-trust/extracted /layer/etc/ssl/certs /layer/etc/pki/tls/certs
@@ -47,9 +47,16 @@ config:
       ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /layer/etc/pki/tls/certs/ca-bundle.crt
       ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /layer/etc/pki/tls/cert.pem
 
-      # Mask systemd-firstboot to prevent interactive prompts on headless first boot
+      # Mask both first-boot wizards to prevent interactive prompts on headless
+      # first boot: systemd-firstboot.service prompts for locale/keymap/timezone/
+      # root password, and systemd-homed-firstboot.service runs
+      # `homectl firstboot --prompt-new-user`. Both are ConditionFirstBoot=yes,
+      # read StandardInput=tty, and order themselves before
+      # first-boot-complete.target, so either one blocks the boot transaction
+      # forever on a console nobody is attached to.
       mkdir -p /layer/etc/systemd/system
       ln -sf /dev/null /layer/etc/systemd/system/systemd-firstboot.service
+      ln -sf /dev/null /layer/etc/systemd/system/systemd-homed-firstboot.service
 
       # Mask audit-rules to prevent failure on shell-free OS (augenrules requires /bin/sh)
       ln -sf /dev/null /layer/etc/systemd/system/audit-rules.service
