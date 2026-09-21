@@ -14,6 +14,7 @@ INSTALLER_ELEMENT = (
 )
 JUSTFILE = REPO_ROOT / "Justfile"
 DDI_ELEMENT = REPO_ROOT / "elements" / "oci" / "bluefin-server-ddi.bst"
+FLATCAR_ZFS_ELEMENT = REPO_ROOT / "elements" / "flatcar" / "flatcar-zfs.bst"
 
 
 def _published_uki_cmdline(installer_element: str) -> str:
@@ -92,10 +93,11 @@ def test_ddi_generates_module_indexes_for_runtime_filesystem_drivers() -> None:
     ddi_element = DDI_ELEMENT.read_text(encoding="utf-8")
 
     assert "freedesktop-sdk.bst:components/kmod.bst" in ddi_element
-    assert 'depmod -b /layer "${KVER}"' in ddi_element
+    assert 'depmod -b /layer/usr "${KVER}"' in ddi_element
     assert "cp -a /etc/pki/ca-trust/extracted/* /layer/etc/pki/ca-trust/extracted/" in ddi_element
     assert "tls-ca-bundle.pem" in ddi_element
     assert "ln -sf /dev/null /layer/etc/systemd/system/systemd-firstboot.service" in ddi_element
+    assert "ln -sf /dev/null /layer/etc/systemd/system/systemd-homed-firstboot.service" in ddi_element
     assert "ln -sf /dev/null /layer/etc/systemd/system/audit-rules.service" in ddi_element
     assert "printf '127.0.0.1   localhost" in ddi_element
     assert "> /layer/etc/hosts" in ddi_element
@@ -121,6 +123,14 @@ def test_installer_loads_storage_drivers_and_settles_udev() -> None:
     assert "After=systemd-udev-settle.service" in installer_element
     assert "Wants=systemd-udev-settle.service" in installer_element
 
+
+def test_installer_hard_preflight_aborts_on_missing_installer_data_part() -> None:
+    installer_element = INSTALLER_ELEMENT.read_text(encoding="utf-8")
+
+    assert '[ ! -b "${INSTALLER_PART_PATH}" ]' in installer_element
+    assert "/dev/disk/by-partlabel/bluefin-installer-data" in installer_element
+    assert "lsblk -p -o NAME,TYPE,PARTLABEL,PKNAME,SIZE,FSTYPE" in installer_element
+
 def test_interactive_installer_uses_local_virtual_console() -> None:
     installer_element = INSTALLER_ELEMENT.read_text(encoding="utf-8")
 
@@ -135,3 +145,66 @@ def test_installer_and_ddi_strip_vmlinux_and_static_archives() -> None:
     assert "find /layer -type f -name '*.a' -delete" in installer_element
     assert 'rm -f "/layer/usr/lib/modules/${KVER}/vmlinux"' in ddi_element
     assert "find /layer -type f -name '*.a' -delete" in ddi_element
+
+
+def test_flatcar_zfs_removes_udevd_sysext_ordering_dropin() -> None:
+    flatcar_zfs = FLATCAR_ZFS_ELEMENT.read_text(encoding="utf-8")
+
+    assert (
+        'rm -rf "%{install-root}/usr/lib/systemd/system/systemd-udevd.service.d"'
+        in flatcar_zfs
+    )
+    assert (
+        'sed -i "/systemd-udevd\\.service\\.d/d" "%{install-root}/usr/lib/tmpfiles.d/10-zfs.conf"'
+        in flatcar_zfs
+    )
+    assert "freedesktop-sdk.bst:components/sed.bst" in flatcar_zfs
+
+    # The preserved raw sysext must be rebuilt from the cleaned tree, not the
+    # untouched upstream image, so the ordering override cannot come back if the
+    # raw is ever merged at runtime.
+    assert "install -D -m 0644 flatcar-zfs.raw" not in flatcar_zfs
+    assert (
+        'mksquashfs "%{install-root}" zfs-cleaned.raw -noappend -no-xattrs -all-root'
+        in flatcar_zfs
+    )
+    assert flatcar_zfs.index("mksquashfs") > flatcar_zfs.index(
+        'rm -rf "%{install-root}/usr/lib/systemd/system/systemd-udevd.service.d"'
+    )
+
+
+def test_var_partition_contracts_use_consistent_partlabel() -> None:
+    import base64
+
+    repart_var = (
+        REPO_ROOT / "files" / "installer" / "repart.d" / "30-var.conf"
+    ).read_text(encoding="utf-8")
+    ddi_element = DDI_ELEMENT.read_text(encoding="utf-8")
+    var_mount = (
+        REPO_ROOT / "files" / "os" / "systemd" / "system" / "var.mount"
+    ).read_text(encoding="utf-8")
+    justfile = JUSTFILE.read_text(encoding="utf-8")
+
+    assert "Label=var" in repart_var
+    assert "/dev/disk/by-partlabel/var /var xfs defaults 0 0" in ddi_element
+    assert "What=/dev/disk/by-partlabel/var" in var_mount
+    expected_b64 = base64.b64encode(
+        b"/dev/disk/by-partlabel/var /var xfs defaults 0 0\n"
+    ).decode("ascii")
+    assert expected_b64 in justfile
+
+
+def test_installer_smoke_probes_the_kiosk_over_tls_from_inside_the_guest() -> None:
+    justfile = JUSTFILE.read_text(encoding="utf-8")
+    assert "systemd.mask=systemd-homed-firstboot.service" in justfile
+    assert "https://127.0.0.1:8080/healthz" in justfile
+    assert "--insecure" in justfile
+    assert "systemd.extra-unit.bluefin-kiosk-ready.service" in justfile
+    assert "systemd.wants=bluefin-kiosk-ready.service" in justfile
+    # The host cannot reach the guest's loopback-bound kiosk proxy, so no
+    # host-side probe may remain in the smoke test — a stray host process on
+    # port 8080 would otherwise let it pass without the guest being ready.
+    smoke = justfile.split("install-vm:")[0]
+    assert "http://127.0.0.1:8080/healthz" not in smoke
+    assert "KIOSK_CONSOLE_READY" in smoke
+

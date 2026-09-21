@@ -103,7 +103,7 @@ config:
       mkdir -p /target-root/boot
       ln -sf "../usr/lib/modules/${TARGET_KVER}/vmlinuz" /target-root/boot/vmlinuz
 
-      depmod -b /target-root "${TARGET_KVER}" || true
+      depmod -b /target-root/usr "${TARGET_KVER}" || true
 
       # Configure dynamic linker search paths so ldconfig indexes FSDK libraries
       # (e.g. libc.so.6, libgcc_s.so.1, libkmod.so) for dracut-install
@@ -194,10 +194,20 @@ config:
       modprobe -q xfs || true
       udevadm trigger --subsystem-match=block || true
       udevadm settle --timeout=15 || true
+      # Hard preflight: abort with diagnostics if installer data partition is absent or not a block device
+      INSTALLER_PART_PATH="/dev/disk/by-partlabel/bluefin-installer-data"
+      if [ ! -b "${INSTALLER_PART_PATH}" ]; then
+        echo "ERROR: Installer data partition '${INSTALLER_PART_PATH}' is missing or not a block device!" >&2
+        echo "==> Block devices visible at failure:" >&2
+        lsblk -p -o NAME,TYPE,PARTLABEL,PKNAME,SIZE,FSTYPE >&2 || true
+        echo "==> Partition label symlinks visible under /dev/disk/by-partlabel/:" >&2
+        ls -la /dev/disk/by-partlabel/ >&2 || true
+        exit 1
+      fi
+      INSTALLER_PART="$(readlink -f "${INSTALLER_PART_PATH}")"
+
       # Auto-detect target disk for unattended install (any raw disk of type "disk" that is not the installer, is not read-only, and has size > 0)
       TARGET_DISK=""
-      INSTALLER_PART="$(readlink -f /dev/disk/by-partlabel/bluefin-installer-data 2>/dev/null || true)"
-
       while read -r name type ro size; do
         [ "${type}" = "disk" ] || continue
         [ "${ro}" = "0" ] || continue
@@ -360,7 +370,7 @@ config:
           rm -rf "${MOD_DIR}/drivers/infiniband"
         fi
         # Re-run depmod to update module dependencies after stripping unneeded modules
-        depmod -b /layer "${KVER}" || true
+        depmod -b /layer/usr "${KVER}" || true
       fi
 
       ( cd /layer && find . -print0 \
