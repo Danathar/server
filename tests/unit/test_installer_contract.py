@@ -123,6 +123,14 @@ def test_installer_loads_storage_drivers_and_settles_udev() -> None:
     assert "After=systemd-udev-settle.service" in installer_element
     assert "Wants=systemd-udev-settle.service" in installer_element
 
+
+def test_installer_hard_preflight_aborts_on_missing_installer_data_part() -> None:
+    installer_element = INSTALLER_ELEMENT.read_text(encoding="utf-8")
+
+    assert '[ ! -b "${INSTALLER_PART_PATH}" ]' in installer_element
+    assert "/dev/disk/by-partlabel/bluefin-installer-data" in installer_element
+    assert "lsblk -p -o NAME,TYPE,PARTLABEL,PKNAME,SIZE,FSTYPE" in installer_element
+
 def test_interactive_installer_uses_local_virtual_console() -> None:
     installer_element = INSTALLER_ELEMENT.read_text(encoding="utf-8")
 
