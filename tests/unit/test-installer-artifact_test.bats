@@ -264,10 +264,14 @@ refute_host_probe_attempted() {
 }
 
 @test "guard: the unit is delivered as an SMBIOS credential and pulled in by the cmdline" {
-    run grep -cF "io.systemd.credential.binary:systemd.extra-unit.bluefin-kiosk-ready.service=" "$JUSTFILE"
+    # Scoped to this recipe's body, like the host-probe guard below: install-vm
+    # also carries this credential/cmdline pair (it reuses the same in-guest
+    # kiosk-ready mechanism), so a whole-file grep would count both recipes'
+    # copies instead of just this one's.
+    run bash -c 'recipe_body() { awk "/^test-installer-artifact:/{p=1;next} p&&/^[a-z][a-z0-9-]*:/{exit} p" "$1"; }; recipe_body "$1" | grep -cF "io.systemd.credential.binary:systemd.extra-unit.bluefin-kiosk-ready.service="' _ "$JUSTFILE"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
-    run grep -cF "systemd.wants=bluefin-kiosk-ready.service" "$JUSTFILE"
+    run bash -c 'recipe_body() { awk "/^test-installer-artifact:/{p=1;next} p&&/^[a-z][a-z0-9-]*:/{exit} p" "$1"; }; recipe_body "$1" | grep -cF "systemd.wants=bluefin-kiosk-ready.service"' _ "$JUSTFILE"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
 }
