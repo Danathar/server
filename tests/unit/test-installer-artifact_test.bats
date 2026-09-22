@@ -237,17 +237,9 @@ refute_log() {
 
 # The root probe's URL has no path suffix; matching end-of-line distinguishes
 # a real call to it from a call to /healthz (which also contains "8080/").
-assert_root_probe_attempted() {
-    if ! grep -qE 'curl .* http://127\.0\.0\.1:8080/$' "$LOG"; then
-        echo "expected the root probe (http://127.0.0.1:8080/) to have been called" >&2
-        cat "$LOG" >&2
-        return 1
-    fi
-}
-
-refute_root_probe_attempted() {
-    if grep -qE 'curl .* http://127\.0\.0\.1:8080/$' "$LOG"; then
-        echo "expected the root probe (http://127.0.0.1:8080/) NOT to have been called" >&2
+refute_host_probe_attempted() {
+    if grep -qE 'curl ' "$LOG"; then
+        echo "expected the host NOT to have run curl at all (the probe lives in the guest)" >&2
         cat "$LOG" >&2
         return 1
     fi
@@ -255,60 +247,91 @@ refute_root_probe_attempted() {
 
 # --- guards: the checks this suite depends on are still the real ones -----
 
-@test "guard: readiness still requires the healthz body to report status ok" {
-    run grep -cF 'jq -e '"'"'.status == "ok"'"'"'' "$JUSTFILE"
+@test "guard: the in-guest probe still requires the healthz body to report status ok" {
+    # The readiness decision moved into the guest with #220: a systemd unit
+    # injected over an SMBIOS credential polls the kiosk proxy from inside
+    # and prints KIOSK_CONSOLE_READY on the console. The two conditions are
+    # now text inside that unit's ExecStart, so they are guarded as text.
+    run grep -cF "curl --silent --fail --insecure --max-time 2 https://127.0.0.1:8080/healthz | jq -r .status)\" = ok ]" "$JUSTFILE"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
 }
 
-@test "guard: readiness still requires the root probe to answer exactly 200" {
-    run grep -cF '[ "$ROOT_CODE" = "200" ]' "$JUSTFILE"
+@test "guard: the in-guest probe still requires the root probe to answer exactly 200" {
+    run grep -cF '"%%{http_code}" https://127.0.0.1:8080/)" = 200 ]' "$JUSTFILE"
     [ "$status" -eq 0 ]
     [ "$output" -eq 1 ]
+}
+
+@test "guard: the unit is delivered as an SMBIOS credential and pulled in by the cmdline" {
+    run grep -cF "io.systemd.credential.binary:systemd.extra-unit.bluefin-kiosk-ready.service=" "$JUSTFILE"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+    run grep -cF "systemd.wants=bluefin-kiosk-ready.service" "$JUSTFILE"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+}
+
+@test "guard: this recipe never probes the kiosk from the host" {
+    # The proxy is bound to the guest's loopback, which a QEMU hostfwd cannot
+    # reach, so a host-side probe would be a probe of nothing. The only host
+    # decision is the serial-log marker. Scoped to this recipe's body:
+    # install-vm is a different recipe and forwards its own ports.
+    recipe_body() {
+        awk '/^test-installer-artifact:/{p=1;next} p&&/^[a-z][a-z0-9-]*:/{exit} p' "$JUSTFILE"
+    }
+    # http, not https: the in-guest probe speaks https to the TLS-terminating
+    # proxy, so a plaintext probe here could only be a host-side one.
+    run bash -c 'recipe_body() { awk "/^test-installer-artifact:/{p=1;next} p&&/^[a-z][a-z0-9-]*:/{exit} p" "$1"; }; recipe_body "$1" | grep -cE "curl [^|]*http://127\.0\.0\.1:8080"' _ "$JUSTFILE"
+    [ "$output" -eq 0 ]
+    run bash -c 'recipe_body() { awk "/^test-installer-artifact:/{p=1;next} p&&/^[a-z][a-z0-9-]*:/{exit} p" "$1"; }; recipe_body "$1" | grep -cF "hostfwd=tcp:127.0.0.1:8080-:8080"' _ "$JUSTFILE"
+    [ "$output" -eq 0 ]
 }
 
 # --- the readiness decision -------------------------------------------------
+#
+# From the host's side the decision is: the marker the in-guest unit prints
+# appears in the serial log. The QEMU stub writes whatever
+# QEMU_SERIAL_LOG_CONTENT holds into the serial file, standing in for the
+# guest console, so each case below seeds the log with what a guest in that
+# state would have printed.
 
-@test "declares readiness only once healthz reports ok status and root answers 200" {
-    export CURL_HEALTHZ_BODY='{"status":"ok"}'
-    export CURL_ROOT_CODE="200"
+@test "declares readiness once the in-guest probe prints the marker on the console" {
+    export QEMU_SERIAL_LOG_CONTENT="<4>kiosk-ready: polling https://127.0.0.1:8080
+<4>KIOSK_CONSOLE_READY"
     run_test_installer_artifact 10
     [ "$status" -eq 0 ]
     [[ "$output" == *"KubeStellar Console is healthy: /healthz status ok, / returned HTTP 200"* ]]
-    assert_root_probe_attempted
+    refute_host_probe_attempted
 }
 
-@test "does not declare readiness when healthz is ok but the root probe never returns 200" {
-    export CURL_HEALTHZ_BODY='{"status":"ok"}'
-    export CURL_ROOT_CODE="503"
+@test "does not declare readiness while the in-guest probe is still waiting" {
+    # The unit prints a progress line every 15 polls while either condition
+    # is unmet; that line must never be mistaken for the marker.
+    export QEMU_SERIAL_LOG_CONTENT="<4>kiosk-ready: polling https://127.0.0.1:8080
+<4>kiosk-ready: waiting k0s=active hz=200 root=503 pods=12 running=9"
     run_test_installer_artifact 1
     [ "$status" -ne 0 ]
     [[ "$output" == *"Timed out after 1s waiting for KubeStellar Console readiness"* ]]
     [[ "$output" != *"KubeStellar Console is healthy"* ]]
-    # The root probe having been reached proves the failure is the "never
-    # 200" branch, not an accidental short-circuit before it.
-    assert_root_probe_attempted
 }
 
-@test "does not declare readiness when root answers 200 but healthz never reports ok" {
-    export CURL_HEALTHZ_BODY='{"status":"degraded"}'
-    export CURL_ROOT_CODE="200"
+@test "does not declare readiness when the guest never prints the marker at all" {
+    export QEMU_SERIAL_LOG_CONTENT="kernel: still booting, never became ready"
     run_test_installer_artifact 1
     [ "$status" -ne 0 ]
     [[ "$output" == *"Timed out after 1s waiting for KubeStellar Console readiness"* ]]
     [[ "$output" != *"KubeStellar Console is healthy"* ]]
-    # healthz status must gate the root probe: a failing/absent status must
-    # never let the loop even ask the root probe.
-    refute_root_probe_attempted
 }
 
-@test "does not declare readiness when the healthz probe cannot connect at all" {
-    export CURL_HEALTHZ_EXIT="7"
-    export CURL_ROOT_CODE="200"
+@test "does not declare readiness on a substring that merely resembles the marker" {
+    # The marker is grepped as a fixed string, so a progress line quoting it
+    # in prose is the closest false positive. The unit never prints one, but
+    # the guard is that only the exact marker line counts.
+    export QEMU_SERIAL_LOG_CONTENT="<4>kiosk-ready: waiting for KIOSK_CONSOLE_READ"
     run_test_installer_artifact 1
     [ "$status" -ne 0 ]
-    [[ "$output" == *"Timed out after 1s waiting for KubeStellar Console readiness"* ]]
-    refute_root_probe_attempted
+    [[ "$output" != *"KubeStellar Console is healthy"* ]]
 }
 
 @test "exits nonzero and reports the failure once the target QEMU process dies" {
@@ -329,7 +352,6 @@ refute_root_probe_attempted() {
 }
 
 @test "dumps the serial log tail when readiness times out instead of the target dying" {
-    export CURL_HEALTHZ_EXIT="7"
     export QEMU_SERIAL_LOG_CONTENT="kernel: still booting, never became ready"
     run_test_installer_artifact 1
     [ "$status" -ne 0 ]
