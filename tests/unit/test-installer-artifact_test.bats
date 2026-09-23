@@ -9,12 +9,27 @@
 # recipe bodies out of the Justfile as text and asserted substrings — every
 # assertion passed whether the underlying health check was correct, weakened,
 # or deleted, because it matched echo/log wording rather than the checks
-# themselves. This suite instead runs the real recipe: a private sandbox copy
-# of the Justfile, with `qemu-system-x86_64`, `curl` and `zstd` replaced by
-# logging stubs on PATH so `just test-installer-artifact` executes for real
-# and the decision logic (readiness requires BOTH a `{"status":"ok"}`
-# `/healthz` body AND an HTTP 200 on `/`, exactly `flash-installer_test.bats`'
-# behavioural style) is exercised rather than paraphrased.
+# themselves.
+#
+# The readiness decision is split across two sides, and this suite covers
+# them differently because only one of them is reachable from a test host:
+#
+#   * Host side (executed for real): the recipe boots the target under QEMU
+#     and waits for the in-guest unit's `KIOSK_CONSOLE_READY` marker to
+#     appear in the serial log, failing on target death or deadline. The
+#     suite runs the real recipe — a private sandbox copy of the Justfile,
+#     with `qemu-system-x86_64`, `curl` and `zstd` replaced by logging stubs
+#     on PATH, the same pattern as `flash-installer_test.bats` — so
+#     `just test-installer-artifact` actually executes and the marker /
+#     PID-death / timeout / log-tail behaviour is exercised, not paraphrased.
+#
+#   * Guest side (guarded as text): since #220 the two-condition check
+#     (`/healthz` reporting `status: ok` AND `/` answering HTTP 200) lives in
+#     a systemd unit injected over an SMBIOS credential and only ever runs
+#     inside the booted guest, against a proxy bound to the guest's
+#     loopback. Nothing on the host can execute it, so it is pinned by
+#     fixed-string greps of the unit's ExecStart (the `guard:` tests below).
+#     Those guards fail if either condition is weakened or dropped.
 #
 # One substitution is applied to the sandboxed Justfile, and asserted exactly
 # like `flash-installer_test.bats` asserts its own: the recipe's OVMF
@@ -168,50 +183,32 @@ EOF
 
 # make_curl_stub
 #
-# Answers the two probes the readiness loop makes, driven entirely by env
-# vars set per test: CURL_HEALTHZ_EXIT/CURL_HEALTHZ_BODY for `/healthz`,
-# CURL_ROOT_EXIT/CURL_ROOT_CODE for `/`. Real `jq` (not stubbed) parses
-# whatever body this stub prints, so the suite exercises the actual
-# `jq -e '.status == "ok"'` check rather than a paraphrase of it.
+# The readiness probe runs inside the guest, so the host should never invoke
+# curl at all. This stub exists only to record any invocation in the call
+# log, so `refute_host_probe_attempted` can prove that. It shapes no
+# response: if the host ever did probe, the stub fails the call loudly
+# rather than pretending to be a reachable kiosk proxy.
 make_curl_stub() {
     cat > "${STUB_DIR}/curl" <<EOF
 #!/usr/bin/env bash
 echo "curl \$*" >> "${LOG}"
-
-url=""
-for a in "\$@"; do url="\$a"; done
-
-case "\$url" in
-    */healthz)
-        [ "\${CURL_HEALTHZ_EXIT:-0}" = "0" ] || exit "\${CURL_HEALTHZ_EXIT}"
-        printf '%s' "\${CURL_HEALTHZ_BODY:-}"
-        exit 0
-        ;;
-    *)
-        [ "\${CURL_ROOT_EXIT:-0}" = "0" ] || exit "\${CURL_ROOT_EXIT}"
-        printf '%s' "\${CURL_ROOT_CODE:-000}"
-        exit 0
-        ;;
-esac
+echo "curl stub: the host is not expected to probe the kiosk" >&2
+exit 1
 EOF
     chmod +x "${STUB_DIR}/curl"
 }
 
 # run_test_installer_artifact [deadline-seconds]
 #
-# All CURL_*/QEMU_*/OVMF_CODE_TEST_OVERRIDE knobs are read from the calling
-# test's exported environment; only the deadline is parameterised here since
-# every test needs one.
+# The QEMU_*/OVMF_CODE_TEST_OVERRIDE knobs are read from the calling test's
+# exported environment; only the deadline is parameterised here since every
+# test needs one.
 run_test_installer_artifact() {
     local deadline="${1:-5}"
     run env PATH="${STUB_DIR}:${PATH}" \
         XDG_CACHE_HOME="${SANDBOX}/cache" \
         OVMF_CODE_TEST_OVERRIDE="${OVMF_STUB}" \
         SHOW_ME_THE_FUTURE_DEADLINE="${deadline}" \
-        CURL_HEALTHZ_EXIT="${CURL_HEALTHZ_EXIT:-0}" \
-        CURL_HEALTHZ_BODY="${CURL_HEALTHZ_BODY:-}" \
-        CURL_ROOT_EXIT="${CURL_ROOT_EXIT:-0}" \
-        CURL_ROOT_CODE="${CURL_ROOT_CODE:-}" \
         QEMU_TARGET_DIES="${QEMU_TARGET_DIES:-0}" \
         QEMU_SERIAL_LOG_CONTENT="${QEMU_SERIAL_LOG_CONTENT:-}" \
         just --justfile "${SANDBOX}/Justfile" \
@@ -235,10 +232,10 @@ refute_log() {
     fi
 }
 
-# The root probe's URL has no path suffix; matching end-of-line distinguishes
-# a real call to it from a call to /healthz (which also contains "8080/").
+# The readiness probe lives in the guest, so no host-side curl invocation is
+# legitimate: any entry in the call log at all is a failure.
 refute_host_probe_attempted() {
-    if grep -qE 'curl ' "$LOG"; then
+    if grep -qF 'curl ' "$LOG"; then
         echo "expected the host NOT to have run curl at all (the probe lives in the guest)" >&2
         cat "$LOG" >&2
         return 1
@@ -328,10 +325,13 @@ refute_host_probe_attempted() {
     [[ "$output" != *"KubeStellar Console is healthy"* ]]
 }
 
-@test "does not declare readiness on a substring that merely resembles the marker" {
-    # The marker is grepped as a fixed string, so a progress line quoting it
-    # in prose is the closest false positive. The unit never prints one, but
-    # the guard is that only the exact marker line counts.
+@test "does not declare readiness on a near-miss of the marker" {
+    # The host greps the serial log for the marker as an unanchored fixed
+    # string, so any line *containing* KIOSK_CONSOLE_READY declares
+    # readiness — that is the contract, not exact-line matching. What this
+    # case pins is the other direction: console text that merely approaches
+    # the marker without containing it (here, a truncated spelling) must not
+    # trip the gate.
     export QEMU_SERIAL_LOG_CONTENT="<4>kiosk-ready: waiting for KIOSK_CONSOLE_READ"
     run_test_installer_artifact 1
     [ "$status" -ne 0 ]
